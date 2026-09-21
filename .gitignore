@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+.pytest_cache/
+runtime/
+.firecrawl/
+*.pyc
+
+
+data/
+dataset_2/
+eeg-motor-movementimagery-dataset-1.0.0/
+*.zip
+*.pdf
+models/
+.env
