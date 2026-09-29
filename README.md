@@ -1,17 +1,99 @@
 # NeuroAgent
 
-NeuroAgent is an EEG motor-imagery pipeline. It uses FBCNet for left/right-hand classification and a structured verification layer for reliability decisions. Implemented today: safe upload, validation, deterministic preprocessing, event epoching, basic quality metrics, left/right-hand prediction, calibrated confidence, a deterministic acceptance policy, an evidence bundle for reviewer agents, and a JSON report.
+NeuroAgent is an EEG motor-imagination review pipeline. A recording is uploaded, five bounded agents read it in order (validation, signal, prediction, decision, report), a fixed deterministic policy authorizes the verdict, and a human reviewer records a separate decision that never overwrites the automated one. Every number in the report is traceable to the stage that produced it.
 
-## Prototype setup
+The backend is FastAPI. The frontend is now a single React 19 + Vite + Tailwind v4 app that builds into `frontend/` and is served by the API itself at `/` (landing) and `/app/` (the review workspace). The old vanilla tool is parked at `/legacy/` until the React tool is verified in its place.
+
+## Quick start
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
+.\\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 uvicorn backend.main:app --reload
 ```
 
-Open `http://127.0.0.1:8000/docs` and use `POST /jobs` to upload a `.fif`, `.edf`, or `.bdf` recording. The result is a job id; fetch the report with `GET /jobs/{job_id}`.
+Open `http://127.0.0.1:8000`. The landing page is at `/`; the review workspace is at `/app/`.
+
+To run the tool with a real recording, upload an event-marked `.edf`, `.fif`, or `.bdf` on `/app/`. The upload is stored unchanged and hashed before any stage reads it, then `POST /live-jobs` starts the pipeline and the workspace polls `GET /live-jobs/{job_id}` every 450 ms until the job leaves `processing`. The finished report is also available at `GET /jobs/{job_id}`.
+
+## What the workspace shows
+
+`/app/` renders five panels:
+
+- **Upload** — multipart `POST /live-jobs` (field name `file`), busy state during the upload, status line driven by the live-polled state.
+- **Evidence checks** — one row per stage (validation, signal, prediction, decision, report), each showing the stage's latest `AgentUpdate` (status, message, duration, timestamp). A "settled" count excludes stages still `working`. When the report exists, deterministic gates are rendered beneath the rows.
+- **Agent pipeline** — five absolute nodes in a row, SVG connectors between them, per-node drag (pointer capture, clamped centre fractions), and a hand-off token animated between nodes when a stage reports its update. Click a finished box for its raw `AgentUpdate`.
+- **Signal Lens** — requests `GET /jobs/{job_id}/signal-preview` once the signal stage has actually settled, draws C3/Cz/C4 traces when a cleaned signal file is persisted, and shows a quality block when the report has a `quality` section. There is no illustrative fallback trace.
+- **Review brief** — shows the automated verdict (`decision`), the FBCNet probabilities and calibration, the evidence signals and warnings, and a reviewer form (`approve` / `mark_uncertain` / `override`). `POST /jobs/{job_id}/review` records the reviewer decision next to the policy verdict.
+
+Resume a finished or running job with `/app/?job={job_id}`. The workspace attaches to it (polling a live entry, or falling back to `GET /jobs/{job_id}` when the in-memory live entry is gone) and renders the report as it would appear at the end of a live run.
+
+## Routes
+
+The API has these paths (all pre-existing except `signal-preview`, which is additive and read-only):
+
+- `GET /health` → `{status, phase, pipeline_version, policy_version}`
+- `POST /jobs` → 201 `JobReport` (multipart `file`; blocking; built-in pipeline runs in-process unless `N8N_WEBHOOK_URL` hands it off)
+- `POST /live-jobs` → 202 `LiveJobStatus` (multipart `file`; non-blocking; the workspace polls this)
+- `GET /live-jobs/{job_id}` → `LiveJobStatus` (polling target; stops when status leaves `processing`)
+- `GET /jobs/{job_id}` → `JobReport`
+- `POST /jobs/{job_id}/review` → `JobReport` (body `{action, reviewer_comment, approved_label?}`)
+- `GET /jobs/{job_id}/signal-preview` → `{job_id, channels, sample_rate_effective, duration_seconds, unit, requested, matched, source}`
+
+`POST /jobs/{job_id}/review` refuses `approve` when there is no prediction (409 `"A prediction is required before it can be approved."`) and refuses an `override` without a label (422). `approve` sets the reviewed label to the predicted label; `mark_uncertain` sets it to `"uncertain"`; `override` sets it to the supplied `left_hand` or `right_hand`. The automated `classification.predicted_label` is preserved beside the reviewer's decision in the stored report.
+
+## Signal Lens and the cleaned-signal file
+
+`GET /jobs/{job_id}/signal-preview` reads the cleaned continuous recording the signal stage wrote (`runtime/{job_id}/internal/signal_cleaned_eeg.fif`, 8-30 Hz band-pass, average reference, decimated for transport). It returns C3, Cz, C4 when the montage exposes them by name, or the first three EEG channels with `matched: false` when it does not. For jobs processed through the `/internal/*` steps (the n8n-driven path) that file is persisted and the trace endpoint returns real values; for jobs processed by the built-in pipeline (the in-process path, which is what `/app/` uses when `N8N_WEBHOOK_URL` is empty), the cleaned recording is kept in memory only and the endpoint returns a 404 with a clear reason. That 404 is intentional and is shown in the workspace as the honest "no cleaned signal persisted" state.
+
+## The merged-review-vs-policy note
+
+The workspace's review form and the API both keep two things side by side: the automated `classification.predicted_label` (what FBCNet produced) and the reviewer's `approved_label` (what the human recorded). The policy verdict (`decision`) is never rewritten by a review. The brief displays the automated verdict as the decision; the reviewer panel displays the human decision next to it. That ordering is deliberate: reviewers act on evidence, and the audit trail keeps the automated and human outcomes distinct.
+
+## Built-in pipeline and the live update asymmetry
+
+The built-in `stream_pipeline` publishes a `working` update for each stage but does not, by itself, publish the `completed` updates for signal, prediction, decision, and report to the live store — only the final `JobReport.agent_updates` carries all five completed updates with durations. The workspace merges the report's completed updates into its polled list when the live entry settles, so the pipeline panel and evidence rows resolve to the real completed state instead of staying stuck on `working`. The live store itself is unchanged (that is the honest server-side state); the merge is a client-side reconciliation.
+
+## Step-wise HTTP API for n8n
+
+`backend/main.py` also exposes the pipeline as five step-wise routes, so an orchestrator such as n8n can drive one stage at a time instead of waiting on a single blocking upload. Each route runs the *same* node function the LangGraph pipeline runs, so a job driven this way produces the same `JobReport` as the in-process pipeline. Only the job id, small JSON metrics, and paths cross the wire; MNE objects are never serialized into a response but kept on disk under `runtime/{job_id}/internal/`. Because `save_upload` records what each job id refers to, every route needs nothing but the id:
+
+| Route | Body | Response |
+| --- | --- | --- |
+| `POST /internal/validate` | `{job_id}` | `{job_id, status, validation_report}` |
+| `POST /internal/signal` | `{job_id}` | `{job_id, status, quality_report}` |
+| `POST /internal/predict` | `{job_id}` | `{job_id, status, classification_report}` |
+| `POST /internal/decide` | `{job_id, validation_report?, quality_report?, classification_report?}` | `{job_id, status, policy_outcome}` |
+| `POST /internal/report` | `{job_id, policy_outcome?}` | the full `JobReport` |
+
+`status` is `valid` or `invalid` for `validate` (mirroring `validation_report.status`), `ok` for `signal`, `predict`, and `decide`, and `failed` — accompanied by a `failed_stage` field — when a stage raised. No route returns a 500 for a pipeline problem: a rejected or unreadable recording still reaches `/internal/report`, which produces the `invalid_input` or `processing_failed` report. `/internal/decide` deliberately reproduces the graph's routing, so when the recording was rejected or an earlier stage failed the signal and prediction evidence is treated as *absent* rather than taken from the request body.
+
+Call the routes in order with a job id from `POST /jobs` or `POST /live-jobs`. They append `AgentUpdate`s to the same live-job store the UI already polls, so the existing frontend shows this path's progress with no changes.
+
+### Importing the n8n workflows
+
+Import the two exported workflows — the pipeline one and the reviewer one — with **Workflows -> Import from File** in the n8n editor, then activate them. The pipeline webhook is `POST /webhook/neuroagent-run` and takes `{ "job_id": "..." }`; it walks `validate -> signal -> predict -> decide -> report`. The reviewer workflow's webhook takes `{job_id, action, note}` and forwards it to the existing `POST /jobs/{job_id}/review`, so human decisions land in the same audit trail as the automated verdict.
+
+Point the HTTP Request nodes at the backend with the `NEUROAGENT_BACKEND_URL` environment variable on the n8n process, which n8n expressions read as `$env.NEUROAGENT_BACKEND_URL`. Use `http://127.0.0.1:8000` for a backend on the same host, and note that n8n must be able to reach it — `127.0.0.1` resolves to the *n8n* container when n8n runs in Docker.
+
+```powershell
+$env:NEUROAGENT_BACKEND_URL = "http://127.0.0.1:8000"
+```
+
+## Frontend build
+
+The web app lives in `web/` and is built with `npm run build`, which emits into `frontend/` (the same directory the API serves statically). The build script cleans only what it emits (`frontend/assets`, `frontend/index.html`, `frontend/app`) and never touches `frontend/legacy/`. Do not hand-edit files under `frontend/assets/` — rerun the build instead. The served tree is `/` (landing), `/app/` (tool), `/legacy/` (vanilla tool), plus the API routes and the static assets under `/assets/`.
+
+```powershell
+cd web
+npm install
+cd ..
+npm run build
+uvicorn backend.main:app --reload
+```
+
+The development server binds to `http://localhost:5173` (IPv6 only in the current Vite config); the production server is the FastAPI process on `http://127.0.0.1:8000`.
 
 ## Classification
 
@@ -23,21 +105,11 @@ Inference reproduces the training preprocessing exactly — 160 Hz, 8-30 Hz band
 
 The report's `decision` field is produced by `backend/policy.py`, which is deterministic: no language model is consulted, and every threshold is a frozen constant recorded in `evidence.provenance.thresholds` so no agent can quietly redefine "acceptable". Agents may *recommend*; only the policy *authorizes*.
 
-`POST /jobs/{job_id}/review` records a human `approve`, `mark_uncertain`, or `override` decision and comment. It never rewrites the original automated decision, which preserves the audit trail. This is in-memory prototype storage; restart the API and jobs/reviews are cleared.
+`POST /jobs/{job_id}/review` records a human `approve`, `mark_uncertain`, or `override` decision and comment. It never rewrites the original automated decision, which preserves the audit trail. This is in-memory prototype storage; restart the API and jobs/reviews are cleared (the workspace's resume path reads `GET /jobs/{job_id}` for finished jobs, so a review recorded before a restart is still reachable through that endpoint until the process is restarted).
 
 `evidence` is the single artifact a reviewer agent consumes — provenance, flat measurements, plain-language signals, every gate with what it observed, the remaining recheck budget, and the actions the verdict permits. `authorize()` refuses any action absent from that allowlist, and refuses `recheck_quality` once the budget is spent.
 
 Order of precedence: invalid input is rejected; poor quality triggers a bounded recheck and then escalates to human review once the budget is gone; a missing or unusable prediction returns uncertain; otherwise the job is accepted, with a warning whenever a soft gate fails. Quality is measured per event-locked epoch: more than 25% of epochs above 300 uV, or any flat EEG channel, is poor quality; isolated amplitude artifacts become warnings. Note that the recheck *budget* is enforced here, but nothing yet performs a recheck run — that is the orchestration step, so `REQUEST_HUMAN_REVIEW` currently arises only when a spent budget is supplied.
-
-### Why confidence cannot gate acceptance
-
-`models/fbcnet_v1_calibration.json` records what a held-out split says about the model's confidence, and the result is decisive: `confidence_discriminative` is **false**. The most confident quartile of trials is only 0.024 more accurate than the base rate, and the high confidence band is *less* accurate (0.576) than the low band (0.599). Temperature scaling still matters — it turns a misleading 0.76 average confidence into an honest 0.55, halving the calibration error from 0.215 to 0.111 — but an honest number is not an informative one.
-
-So plain `ACCEPT` is deliberately unreachable for this checkpoint, and the policy refuses to gate on confidence. A stronger model (or an agent reasoning over quality evidence instead) is what has to earn `ACCEPT` back.
-
-## Phase 3 scope
-
-The Phase 3 prototype includes upload UI, FBCNet inference, per-epoch signal-quality checks, a deterministic policy, evidence records, and human review. Input recordings must contain events; without them the job is reported as `invalid_input` rather than pretending to create task epochs. ICA, persistence, authentication, and automated recheck orchestration remain subsequent work. Predictions are reported as-is: at ~60% cross-subject test accuracy the model is a working end-to-end path, not a trustworthy verdict.
 
 ## Checks
 

@@ -1,0 +1,133 @@
+@import "tailwindcss";
+
+/*
+  NeuroAgent instrument palette. The five values below are the whole colour contract:
+    canvas   #07090B   text #ECEFEE   panel #12181C   accent #E4293F   muted #5C6570
+  Two derived neutrals are unavoidable in a dense panel layout -- a hairline to separate
+  rows without a drop shadow, and a recessed well for inputs and code. No other hues:
+  "done" is a settled neutral with a check, "failed" is the accent, "working" is the
+  accent animating. Colour carries state, not decoration.
+*/
+@theme {
+  --color-canvas: #07090b;
+  --color-panel: #12181c;
+  --color-panel-well: #0d1215;
+  --color-line: #1e262c;
+  --color-ink: #ecefee;
+  --color-muted: #5c6570;
+  --color-accent: #e4293f;
+
+  --font-sans: "Inter Tight", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+
+  --radius-none: 0px;
+}
+
+/* shadcn/ui reads these names, so the same palette drives its primitives too. */
+:root {
+  --background: #07090b;
+  --foreground: #ecefee;
+  --card: #12181c;
+  --card-foreground: #ecefee;
+  --popover: #12181c;
+  --popover-foreground: #ecefee;
+  --primary: #e4293f;
+  --primary-foreground: #ecefee;
+  --secondary: #12181c;
+  --secondary-foreground: #ecefee;
+  --muted: #12181c;
+  --muted-foreground: #5c6570;
+  --accent: #12181c;
+  --accent-foreground: #ecefee;
+  --destructive: #e4293f;
+  --destructive-foreground: #ecefee;
+  --border: #1e262c;
+  --input: #1e262c;
+  --ring: #e4293f;
+  --radius: 0px;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+
+  html {
+    background: var(--color-canvas);
+    color-scheme: dark;
+  }
+
+  body {
+    margin: 0;
+    background: var(--color-canvas);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-size: 15px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  ::selection {
+    background: var(--color-accent);
+    color: #fff;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
+}
+
+@keyframes pulseBorder {
+  50% {
+    box-shadow: 0 0 0 4px rgba(228, 41, 63, 0.18);
+  }
+}
+
+@utility num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+/* A dense panel surface: a hairline box, never a rounded card with a drop shadow. */
+@utility surface {
+  background: var(--color-panel);
+  border: 1px solid var(--color-line);
+}
+
+/* Field labels read as small sans text, not shouty uppercase eyebrows. Mono is reserved for
+   values, ids and timestamps -- see the `num` utility. */
+@utility label-micro {
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.005em;
+  color: var(--color-muted);
+}

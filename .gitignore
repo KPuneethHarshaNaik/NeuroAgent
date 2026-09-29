@@ -1,15 +1,27 @@
 .venv/
 __pycache__/
 .pytest_cache/
-runtime/
 .firecrawl/
 *.pyc
+node_modules/
+.vite/
+*.tsbuildinfo
 
-
+runtime/
+jobs/
 data/
-dataset_2/
+
+# Built frontend output lives in frontend/ and is committed (it is what FastAPI serves).
+# Do not ignore it; the build script cleans only what it emits and never nukes frontend/legacy/.
+# eeg dataset is local; keep it out of the repo.
 eeg-motor-movementimagery-dataset-1.0.0/
+dataset_2/
+*.edf
 *.zip
 *.pdf
 models/
 .env
+
+# Local lockfile + local reviewer doc: not part of the shipped repo.
+package-lock.json
+reviewer_documentation.md
